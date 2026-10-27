@@ -1,4 +1,4 @@
-package com.ansub.tvhome;
+package dev.local.mitvhome;
 
 import java.util.HashMap;
 import java.util.Locale;

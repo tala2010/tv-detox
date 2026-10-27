@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds out/tvhome.apk. Needs Java 17 and the Android SDK (platform 34, build-tools 34).
+# Builds the Xiaomi fork as out/tvhome.apk. Java 17, Android SDK platform/build-tools 34.
 #   macOS:  brew install openjdk@17 && brew install --cask android-commandlinetools
 #           sdkmanager "platforms;android-34" "build-tools;34.0.0"
 # Use a different app list with: APPS=my-apps.txt sh build.sh
@@ -17,7 +17,7 @@ rm -rf out; mkdir -p out/classes out/dex out/gen/com/ansub/tvhome
 
 # Turn the app list into Apps.java.
 {
-  echo "package com.ansub.tvhome;"
+  echo "package dev.local.mitvhome;"
   echo "final class Apps { static final String[] LIST = {"
   grep -v '^[[:space:]]*#' "${APPS:-apps.txt}" | tr -d ' \t\r' | grep -v '^$' | sed 's/.*/    "&",/'
   echo "}; }"

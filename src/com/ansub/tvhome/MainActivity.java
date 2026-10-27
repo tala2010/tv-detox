@@ -1,4 +1,4 @@
-package com.ansub.tvhome;
+package dev.local.mitvhome;
 
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
@@ -85,7 +85,7 @@ public class MainActivity extends Activity {
     //   --es quick "bluetooth,sound,picture"
     // (--es quick none  takes them away again; "wifi" and "ethernet" are the network tile now).
     private static final String PREFS = "config";
-    private static final List<String> NOT_APPS = Arrays.asList("com.android.vending", "com.android.tv.settings",
+    private static final List<String> NOT_APPS = Arrays.asList("com.ansub.tvhome", "com.android.vending", "com.android.tv.settings",
             "com.android.tv", "com.google.android.tvlauncher", "com.google.android.apps.tv.launcherx",
             "com.google.android.leanbacklauncher");
     private static final String PLAY_STORE = "com.android.vending";
@@ -160,6 +160,14 @@ public class MainActivity extends Activity {
     private int tileW, tileH, gridTop; // app grid geometry, set by buildTiles
     private final List<View> tiles = new ArrayList<>();
     private final Map<View, ValueAnimator> lifts = new WeakHashMap<>(); // a running focus fade per tile
+    private final Map<String, TextView> inputStatusLabels = new HashMap<>();
+    private TvInputManager inputManager;
+    private final TvInputManager.TvInputCallback inputChanged = new TvInputManager.TvInputCallback() {
+        @Override public void onInputStateChanged(String id, int state) { refreshInputTiles(); }
+        @Override public void onInputAdded(String id) { dirty = true; refreshApps(); }
+        @Override public void onInputRemoved(String id) { dirty = true; refreshApps(); }
+        @Override public void onInputUpdated(String id) { dirty = true; refreshApps(); }
+    };
     private boolean dirty = true;
     private java.util.Locale shownLocale; // the TV's language (and region) when the page was built
     private String focusedKey;
@@ -251,10 +259,13 @@ public class MainActivity extends Activity {
             if (android.os.Build.VERSION.SDK_INT >= 24) cm.registerDefaultNetworkCallback(networkChanged);
             else cm.registerNetworkCallback(new NetworkRequest.Builder().build(), networkChanged);
         } catch (Exception ignored) {}
+        inputManager = (TvInputManager) getSystemService(Context.TV_INPUT_SERVICE);
+        if (inputManager != null) inputManager.registerCallback(inputChanged, new android.os.Handler(getMainLooper()));
     }
 
     @Override
     protected void onDestroy() {
+        if (inputManager != null) inputManager.unregisterCallback(inputChanged);
         unregisterReceiver(packagesChanged);
         ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
         if (cm != null) try { cm.unregisterNetworkCallback(networkChanged); } catch (Exception ignored) {}
@@ -352,6 +363,7 @@ public class MainActivity extends Activity {
             buildTiles();
         }
         refreshNetwork();
+        refreshInputTiles();
         View f = getCurrentFocus();
         if (f == null && !tiles.isEmpty()) tiles.get(0).requestFocus();
         HomeButton.onHomeResumed(this); // back on this home screen: Home comes here again
@@ -487,6 +499,7 @@ public class MainActivity extends Activity {
             ((ViewGroup) wrap.getParent()).removeView(wrap);
         }
         tiles.clear();
+        inputStatusLabels.clear();
         rowApps.clear();
         movingKey = null;
         moveHint.setVisibility(View.GONE);
@@ -595,6 +608,18 @@ public class MainActivity extends Activity {
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
             lp.topMargin = px(12);
             inner.addView(t, lp);
+            if (isInput(key)) {
+                TextView status = text(px(19), 0xC0FFFFFF, regular);
+                status.setGravity(Gravity.CENTER);
+                LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(-2, -2);
+                sp.topMargin = px(5);
+                inner.addView(status, sp);
+                inputStatusLabels.put(key, status);
+                boolean connected = inputConnected(key);
+                status.setText(connected ? "已连接" : "未连接");
+                card.setContentDescription(label + (connected ? "，已连接" : "，未连接"));
+                if (connected) bg.setColor(0xFF0A3D91);
+            }
             card.addView(inner, new FrameLayout.LayoutParams(-1, -1));
         }
         card.setBackground(bg);
@@ -613,7 +638,9 @@ public class MainActivity extends Activity {
         final boolean glass = banner == null;
         card.setOnFocusChangeListener((v, has) -> {
             if (has) focusedKey = key;
-            lift(v, bg, has, glass ? 0x13FFFFFF : 0xFF1E1A1C, glass ? 0x38FFFFFF : 0xFF1E1A1C,
+            boolean connected = isInput(key) && inputConnected(key);
+            lift(v, bg, has, connected ? 0xFF0A3D91 : glass ? 0x13FFFFFF : 0xFF1E1A1C,
+                    connected ? 0xFF1556B0 : glass ? 0x38FFFFFF : 0xFF1E1A1C,
                     px(RADIUS), px(RADIUS + RADIUS_UP));
             if (caption != null) {
                 caption.animate().cancel();
@@ -791,6 +818,15 @@ public class MainActivity extends Activity {
     // Google TV's input player, that goes first, because some Google TVs ship com.android.tv as a stub
     // that starts fine but only says "Hello World!" (issue #5).
     private void openInput(String id) {
+        int xiaomiInput = XiaomiInputs.nativeInput(id);
+        if (xiaomiInput >= 0 && isXiaomi()) {
+            try {
+                startActivity(new Intent("com.xiaomi.mitv.tvplayer.EXTSRC_PLAY")
+                        .setClassName("com.xiaomi.mitv.tvplayer", "com.xiaomi.mitv.tvplayer.ExternalSourceActivity")
+                        .putExtra("input", xiaomiInput).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                return;
+            } catch (RuntimeException ignored) { /* Keep the upstream path on other firmware. */ }
+        }
         Intent view = new Intent(Intent.ACTION_VIEW, TvContract.buildChannelUriForPassthroughInput(id));
         List<Intent> tries = new ArrayList<>();
         ResolveInfo def = getPackageManager().resolveActivity(view, PackageManager.MATCH_DEFAULT_ONLY);
@@ -922,6 +958,18 @@ public class MainActivity extends Activity {
     // panel, then Android's Display page), then Android TV's Display & Sound page, else TV settings.
     // Only system screens are started, so it needs no permission and changes nothing by itself.
     private void openBrightness() {
+        if ("MiTV-MFTP0".equals(android.os.Build.MODEL)) {
+            android.content.ComponentName receiver = new android.content.ComponentName(
+                    "com.xiaomi.mitv.settings", "com.xiaomi.mitv.settings.SettingsBroadcastReceiver");
+            try {
+                android.content.pm.ActivityInfo info = getPackageManager().getReceiverInfo(receiver, 0);
+                if (info.enabled && info.applicationInfo.enabled) {
+                    sendBroadcast(new Intent("com.xiaomi.mitv.settings.display_settings")
+                            .setComponent(receiver).addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES));
+                    return;
+                }
+            } catch (Exception ignored) {}
+        }
         if (openQuick("picture")) return;
         Intent i = new Intent().setClassName(TV_DISPLAY_SOUND[0], TV_DISPLAY_SOUND[1]);
         if (i.resolveActivity(getPackageManager()) != null) {
@@ -934,6 +982,14 @@ public class MainActivity extends Activity {
     }
 
     private void openTvSettings() {
+        if (isXiaomi()) {
+            try {
+                startActivity(new Intent("com.xiaomi.mitv.settings.SETTINGS")
+                        .setClassName("com.xiaomi.mitv.settings", "com.xiaomi.mitv.settings.entry.MainActivity")
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                return;
+            } catch (RuntimeException ignored) {}
+        }
         try { startActivity(new Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); }
         catch (Exception ignored) {}
     }
@@ -1392,6 +1448,8 @@ public class MainActivity extends Activity {
     // HDMI inputs are what a home screen shows. install.sh's FAKE_INPUT=1 takes every TV input
     // instead, so the tiles and their menus can be tested on an emulator that has no HDMI of its own.
     private boolean countsAsInput(TvInputInfo in) {
+        // This firmware registers HW8 but the native source picker and chassis have only HDMI 1-3.
+        if (XiaomiInputs.isPhantom(android.os.Build.MODEL, in.getId())) return false;
         boolean fake = "1".equals(prefs().getString(PREF_FAKE_INPUTS, null));
         return (fake || in.getType() == TvInputInfo.TYPE_HDMI) && in.getParentId() == null && !in.isHidden(this);
     }
@@ -1404,6 +1462,38 @@ public class MainActivity extends Activity {
         for (TvInputInfo in : tim.getTvInputList()) if (countsAsInput(in)) out.add(in);
         Collections.sort(out, (a, b) -> a.getId().compareTo(b.getId()));
         return out;
+    }
+
+    private boolean inputConnected(String id) {
+        TvInputManager manager = (TvInputManager) getSystemService(Context.TV_INPUT_SERVICE);
+        if (manager == null) return false;
+        try { return manager.getInputState(id) == TvInputManager.INPUT_STATE_CONNECTED; }
+        catch (IllegalArgumentException ignored) { return false; }
+    }
+
+    private boolean isXiaomi() {
+        return "xiaomi".equalsIgnoreCase(android.os.Build.MANUFACTURER)
+                || "redmi".equalsIgnoreCase(android.os.Build.MANUFACTURER);
+    }
+
+    private void refreshInputTiles() {
+        for (View card : tiles) {
+            String id = String.valueOf(card.getTag());
+            if (!isInput(id)) continue;
+            boolean connected = inputConnected(id);
+            TextView status = inputStatusLabels.get(id);
+            if (status != null) status.setText(connected ? "已连接" : "未连接");
+            TvInputInfo info = inputById(id);
+            card.setContentDescription((info == null ? "HDMI" : inputLabel(info))
+                    + (connected ? "，已连接" : "，未连接"));
+            ValueAnimator animation = lifts.remove(card);
+            if (animation != null) animation.cancel();
+            if (card.getBackground() instanceof GradientDrawable) {
+                ((GradientDrawable) card.getBackground()).setColor(connected
+                        ? card.hasFocus() ? 0xFF1556B0 : 0xFF0A3D91
+                        : card.hasFocus() ? 0x38FFFFFF : 0x13FFFFFF);
+            }
+        }
     }
 
     private TvInputInfo inputById(String id) {

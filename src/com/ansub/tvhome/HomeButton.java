@@ -1,4 +1,4 @@
-package com.ansub.tvhome;
+package dev.local.mitvhome;
 
 import android.accessibilityservice.AccessibilityService;
 import android.content.ComponentName;

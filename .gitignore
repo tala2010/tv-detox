@@ -1,5 +1,12 @@
 out/
 key.jks
+*.jks
+*.keystore
+out-custom/
+out-tests/
+backups/
+*.zip
+local.properties
 *.apk
 .DS_Store
 .idea
